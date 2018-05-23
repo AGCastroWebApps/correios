@@ -289,7 +289,8 @@ class Package:
                  diameter: Union[float, int] = 0,  # cm
                  weight: Union[float, int] = 0,  # g
                  sequence=(1, 1),
-                 service: Optional[Union[Service, str, int]] = None) -> None:
+                 service: Optional[Union[Service, str, int]] = None,
+                 declared_value: Decimal = Decimal("0.00")) -> None:
 
         if service:
             service = Service.get(service)
@@ -308,6 +309,7 @@ class Package:
         self.real_weight = weight  # g
         self.sequence = sequence
         self.service = service
+        self.declared_value = declared_value
 
     @property
     def width(self) -> int:
@@ -383,13 +385,24 @@ class Package:
 
     @property
     def is_mechanizable(self) -> bool:
-        if self.package_type == Package.TYPE_CYLINDER:
-            return False
-        return max(self.width, self.height, self.length) <= MAX_MECHANIZABLE_PACKAGE_SIZE
+        return Package.check_mechanizability(self.width, self.length, self.height, self.package_type)
 
     @property
     def non_mechanizable_cost(self):
-        return Decimal('0.0') if self.is_mechanizable else NON_MECHANIZABLE_COST
+        return Package.calculate_non_mechanizable_cost(self.width, self.length, self.height, self.package_type)
+
+    @property
+    def insurance_cost(self):
+        return Package.calculate_insurance(self.declared_value, self.service)
+
+    @property
+    def additional_costs(self):
+        return Package.calculate_additional_costs(self.declared_value,
+                                                  self.service,
+                                                  self.width,
+                                                  self.height,
+                                                  self.length,
+                                                  self.package_type)
 
     @classmethod
     def calculate_volumetric_weight(cls, width, height, length) -> int:
@@ -403,18 +416,33 @@ class Package:
 
     @classmethod
     def calculate_insurance(cls,
-                            per_unit_value: Union[int, float, Decimal],
-                            service: Union[Service, int, str],
-                            quantity: int = 1) -> Decimal:
-        value = Decimal("0.00")
-        per_unit_value = Decimal(per_unit_value)
+                            declared_value: Decimal,
+                            service: Union[Service, int, str]) -> Decimal:
+        insurance_value = Decimal("0.00")
         service_code = Service.get(service).code
-        insurance_value_threshold = INSURANCE_VALUE_THRESHOLDS.get(service_code, per_unit_value)
+        insurance_value_threshold = INSURANCE_VALUE_THRESHOLDS.get(service_code, declared_value)
 
-        if per_unit_value > insurance_value_threshold:
-            value = (per_unit_value - insurance_value_threshold) * INSURANCE_PERCENTUAL_COST
+        if declared_value > insurance_value_threshold:
+            insurance_value = declared_value * INSURANCE_PERCENTUAL_COST
 
-        return to_decimal(value * quantity)
+        return to_decimal(insurance_value)
+
+    @classmethod
+    def calculate_non_mechanizable_cost(cls, width, height, length, package_type):
+        is_mechanizable = cls.check_mechanizability(width, height, length, package_type)
+        return Decimal('0.0') if is_mechanizable else NON_MECHANIZABLE_COST
+
+    @classmethod
+    def calculate_additional_costs(cls, declared_value, service, width, height, length, package_type):
+        insurance_cost = cls.calculate_insurance(declared_value, service)
+        non_mechanizable_cost = cls.non_mechanizable_cost(width, height, length, package_type)
+        return insurance_cost + non_mechanizable_cost
+
+    @classmethod
+    def check_mechanizability(cls, width, height, length, package_type):
+        if package_type == Package.TYPE_CYLINDER:
+            return Decimal
+        return max(width, height, length) <= MAX_MECHANIZABLE_PACKAGE_SIZE
 
     @classmethod
     def validate(cls,
@@ -530,7 +558,6 @@ class ShippingLabel:
                  invoice_number: str = "",
                  invoice_series: str = "",
                  invoice_type: str = "",
-                 value: Decimal = Decimal("0.00"),
                  billing: Decimal = Decimal("0.00"),
                  text: str = "",
                  latitude: float = 0.0,
@@ -556,7 +583,6 @@ class ShippingLabel:
         self.invoice_number = invoice_number
         self.invoice_series = invoice_series
         self.invoice_type = invoice_type
-        self.real_value = value
         self.billing = billing
         self.text = text
         self.latitude = latitude
@@ -580,12 +606,12 @@ class ShippingLabel:
     def add_extra_service(self, extra_service: Union["ExtraService", int]):
         extra_service = ExtraService.get(extra_service)
         if extra_service.is_declared_value():
-            self.service.validate_declared_value(self.value)
+            self.service.validate_declared_value(self.declared_value)
         self.extra_services.append(extra_service)
 
     @property
-    def value(self) -> Decimal:
-        return max(self.service.min_declared_value, self.real_value)
+    def declared_value(self) -> Decimal:
+        return max(self.service.min_declared_value, self.package.declared_value)
 
     @property
     def symbol(self):
@@ -656,7 +682,7 @@ class ShippingLabel:
             "{!s:>02}".format(self.posting_list_group),
             "{}".format(receiver_number),
             "{!s:<20}".format(self.receiver.complement[:20]),
-            "{!s:>05}".format(0 if self.value is None else int(self.value * 100)),
+            "{!s:>05}".format(0 if self.declared_value is None else int(self.declared_value * 100)),
             "{}".format(str(self.receiver.phone)[:12].rjust(12, "0") or "0" * 12),
             "{:+010.6f}".format(self.latitude),
             "{:+010.6f}".format(self.longitude),
